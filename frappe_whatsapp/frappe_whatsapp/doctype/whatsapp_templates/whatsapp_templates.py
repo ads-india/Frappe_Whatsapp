@@ -5,6 +5,7 @@
 import os
 import json
 import frappe
+from frappe_whatsapp.utils.providers import get_provider
 import magic
 from frappe.model.document import Document
 from frappe.integrations.utils import make_post_request, make_request
@@ -201,76 +202,67 @@ class WhatsAppTemplates(Document):
 
 @frappe.whitelist()
 def fetch():
-    """Fetch templates from meta."""
+    """Fetch templates from the configured WhatsApp provider."""
 
-    # get credentials
+    # 1. Get WhatsApp Settings
     settings = frappe.get_doc("WhatsApp Settings", "WhatsApp Settings")
-    token = settings.get_password("token")
-    url = settings.url
-    version = settings.version
-    business_id = settings.business_id
 
-    headers = {"authorization": f"Bearer {token}", "content-type": "application/json"}
+    # 2. Get the appropriate provider instance using the factory function
+    # This abstracts away which specific API (Meta, Exotel, etc.) is being used.
+    provider_instance = get_provider(settings)
 
-    try:
-        response = make_request(
-            "GET",
-            f"{url}/{version}/{business_id}/message_templates",
-            headers=headers,
-        )
+    # 3. Use the provider's fetch_templates method
+    # The provider is now responsible for making the actual API call,
+    # handling its specific authentication, URLs, and initial error logging.
+    # It will throw a Frappe exception if an API error occurs, which will be caught by Frappe.
+    response = provider_instance.fetch_templates()
 
-        for template in response["data"]:
-            # set flag to insert or update
-            flags = 1
-            if frappe.db.exists("WhatsApp Templates", {"actual_name": template["name"]}):
-                doc = frappe.get_doc("WhatsApp Templates", {"actual_name": template["name"]})
-            else:
-                flags = 0
-                doc = frappe.new_doc("WhatsApp Templates")
-                doc.template_name = template["name"]
-                doc.actual_name = template["name"]
+    # 4. Process the response (common logic for all providers)
+    if not response or "data" not in response:
+        frappe.throw(_("No templates data received from the provider."))
 
-            doc.status = template["status"]
-            doc.language_code = template["language"]
-            doc.category = template["category"]
-            doc.id = template["id"]
+    for template in response["data"]:
+        doc = None
+        # Check if the template already exists using actual_name (Meta's template name)
+        if frappe.db.exists("WhatsApp Templates", {"actual_name": template["name"]}):
+            doc = frappe.get_doc("WhatsApp Templates", {"actual_name": template["name"]})
+            is_new_doc = False
+        else:
+            doc = frappe.new_doc("WhatsApp Templates")
+            doc.template_name = template["name"] # Frappe DocType name
+            doc.actual_name = template["name"] # Meta's actual template name
+            is_new_doc = True
 
-            # update components
-            for component in template["components"]:
+        doc.status = template["status"]
+        doc.language_code = template["language"]
+        doc.category = template["category"]
+        doc.id = template["id"] # Meta's template ID
 
-                # update header
-                if component["type"] == "HEADER":
-                    doc.header_type = component["format"]
+        # Update components
+        for component in template.get("components", []):
+            if component["type"] == "HEADER":
+                doc.header_type = component["format"]
+                if component["format"] == "TEXT":
+                    doc.header = component.get("text")
+            elif component["type"] == "FOOTER":
+                doc.footer = component.get("text")
+            elif component["type"] == "BODY":
+                doc.template = component.get("text")
+                if component.get("example"):
+                    body_text_examples = component["example"].get("body_text", [])
+                    if body_text_examples and body_text_examples[0]:
+                        doc.sample_values = ",".join(str(val) for val in body_text_examples[0])
+                    else:
+                        doc.sample_values = None
+                else:
+                    doc.sample_values = None
 
-                    # if format is text update sample text
-                    if component["format"] == "TEXT":
-                        doc.header = component["text"]
-                # Update footer text
-                elif component["type"] == "FOOTER":
-                    doc.footer = component["text"]
+        # Save the document
+        if not is_new_doc:
+            doc.db_update() # Update existing document, ignoring hooks
+        else:
+            doc.db_insert() # Insert new document, ignoring hooks
 
-                # update template text
-                elif component["type"] == "BODY":
-                    doc.template = component["text"]
-                    if component.get("example"):
-                        doc.sample_values = ",".join(
-                            component["example"]["body_text"][0]
-                        )
+        frappe.db.commit() # Commit after each template to ensure atomic operations
 
-            # if document exists update else insert
-            # used db_update and db_insert to ignore hooks
-            if flags:
-                doc.db_update()
-            else:
-                doc.db_insert()
-            frappe.db.commit()
-
-    except Exception as e:
-        res = frappe.flags.integration_request.json()["error"]
-        error_message = res.get("error_user_msg", res.get("message"))
-        frappe.throw(
-            msg=error_message,
-            title=res.get("error_user_title", "Error"),
-        )
-
-    return "Successfully fetched templates from meta"
+    return _("Successfully fetched templates from the configured WhatsApp provider")
