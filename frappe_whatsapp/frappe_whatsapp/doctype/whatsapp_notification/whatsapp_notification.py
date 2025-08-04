@@ -6,10 +6,9 @@ import frappe
 from frappe import _dict, _
 from frappe.model.document import Document
 from frappe.utils.safe_exec import get_safe_globals, safe_exec
-from frappe.integrations.utils import make_post_request
 from frappe.desk.form.utils import get_pdf_link
 from frappe.utils import add_to_date, nowdate, datetime
-
+from frappe_whatsapp.utils.providers import get_provider
 
 class WhatsAppNotification(Document):
     """Notification."""
@@ -129,7 +128,7 @@ class WhatsAppNotification(Document):
                     if isinstance(doc, Document):
                         # get field with prettier value.
                         value = doc.get_formatted(field.field_name)
-                    else: 
+                    else:
                         value = doc_data[field.field_name]
                         if isinstance(doc_data[field.field_name], (datetime.date, datetime.datetime)):
                             value = str(doc_data[field.field_name])
@@ -215,82 +214,62 @@ class WhatsAppNotification(Document):
             self.notify(data, doc_data)
 
     def notify(self, data, doc_data=None):
-        """Notify."""
-        settings = frappe.get_doc(
-            "WhatsApp Settings", "WhatsApp Settings",
-        )
-        token = settings.get_password("token")
+        settings = frappe.get_doc("WhatsApp Settings", "WhatsApp Settings")
+        provider = get_provider(settings)
 
-        headers = {
-            "authorization": f"Bearer {token}",
-            "content-type": "application/json"
-        }
         try:
-            success = False
-            response = make_post_request(
-                f"{settings.url}/{settings.version}/{settings.phone_id}/messages",
-                headers=headers, data=json.dumps(data)
-            )
+            standard_response = provider.send(data, self.template)
 
-            if not self.get("content_type"):
-                self.content_type = 'text'
+            if standard_response.status == "sent":
+                if not self.get("content_type"):
+                    self.content_type = 'text'
 
-            new_doc = {
-                "doctype": "WhatsApp Message",
-                "type": "Outgoing",
-                "message": str(data['template']),
-                "to": data['to'],
-                "message_type": "Template",
-                "message_id": response['messages'][0]['id'],
-                "content_type": self.content_type,
-            }
+                new_doc = {
+                    "doctype": "WhatsApp Message",
+                    "type": "Outgoing",
+                    # Use text if template is not present
+                    "message": str(data.get('template') or data.get('text', '')),
+                    "to": data['to'],
+                    # Determine message type based on payload
+                    "message_type": "Template" if data.get('template') else "Text",
+                    "message_id": standard_response.message_id,
+                    "content_type": self.content_type,
+                }
 
-            if doc_data:
-                new_doc.update({
-                    "reference_doctype": doc_data.doctype,
-                    "reference_name": doc_data.name,
-                })
+                if doc_data:
+                    new_doc.update({
+                        "reference_doctype": doc_data.get("doctype"),
+                        "reference_name": doc_data.get("name"),
+                    })
 
-            frappe.get_doc(new_doc).save(ignore_permissions=True)
+                frappe.get_doc(new_doc).save(ignore_permissions=True)
 
-            if doc_data and self.set_property_after_alert and self.property_value:
-                if doc_data.doctype and doc_data.name:
-                    fieldname = self.set_property_after_alert
-                    value = self.property_value
-                    meta = frappe.get_meta(doc_data.get("doctype"))
-                    df = meta.get_field(fieldname)
-                    if df:
-                        if df.fieldtype in frappe.model.numeric_fieldtypes:
-                            value = frappe.utils.cint(value)
+                if doc_data and self.set_property_after_alert and self.property_value:
+                    if doc_data.get("doctype") and doc_data.get("name"):
+                        fieldname = self.set_property_after_alert
+                        value = self.property_value
+                        meta = frappe.get_meta(doc_data.get("doctype"))
+                        df = meta.get_field(fieldname)
+                        if df:
+                            if df.fieldtype in frappe.model.numeric_fieldtypes:
+                                value = frappe.utils.cint(value)
+                            frappe.db.set_value(doc_data.get("doctype"), doc_data.get("name"), fieldname, value)
 
-                        frappe.db.set_value(doc_data.get("doctype"), doc_data.get("name"), fieldname, value)
-
-            frappe.msgprint("WhatsApp Message Triggered", indicator="green", alert=True)
-            success = True
+                frappe.msgprint(_("WhatsApp Message Triggered"), indicator="green", alert=True)
+            else:
+                # If provider.send returned a 'failed' status but didn't throw an exception immediately
+                frappe.msgprint(
+                    _("Failed to trigger whatsapp message: {0}").format(standard_response.error_message or "Unknown error"),
+                    indicator="red",
+                    alert=True
+                )
 
         except Exception as e:
-            error_message = str(e)
-            if frappe.flags.integration_request:
-                response = frappe.flags.integration_request.json()['error']
-                error_message = response.get('Error', response.get("message"))
-
             frappe.msgprint(
-                f"Failed to trigger whatsapp message: {error_message}",
+                _("Failed to trigger whatsapp message: {0}").format(str(e)),
                 indicator="red",
                 alert=True
             )
-        finally:
-            if not success:
-                meta = {"error": error_message}
-            else:
-                meta = frappe.flags.integration_request.json()
-            frappe.get_doc({
-                "doctype": "WhatsApp Notification Log",
-                "template": self.template,
-                "meta_data": meta
-            }).insert(ignore_permissions=True)
-
-
     def on_trash(self):
         """On delete remove from schedule."""
         frappe.cache().delete_value("whatsapp_notification_map")
@@ -335,7 +314,7 @@ def call_trigger_notifications():
     """Trigger notifications."""
     try:
         # Directly call the trigger_notifications function
-        trigger_notifications()  
+        trigger_notifications()
     except Exception as e:
         # Log the error but do not show any popup or alert
         frappe.log_error(frappe.get_traceback(), "Error in call_trigger_notifications")
@@ -354,4 +333,3 @@ def trigger_notifications(method="daily"):
         for d in doc_list:
             alert = frappe.get_doc("WhatsApp Notification", d.name)
             alert.get_documents_for_today()
-           

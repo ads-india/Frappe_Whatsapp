@@ -7,15 +7,41 @@
  "engine": "InnoDB",
  "field_order": [
   "enabled",
+  "provider",
+  "meta_settings_section",
   "token",
   "url",
   "version",
   "phone_id",
   "business_id",
   "app_id",
-  "webhook_verify_token"
+  "webhook_verify_token",
+  "exotel_settings_section",
+  "from_number",
+  "api_key",
+  "api_token",
+  "subdomain",
+  "sid"
  ],
  "fields": [
+  {
+   "default": "0",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "default": "Meta",
+   "fieldname": "provider",
+   "fieldtype": "Select",
+   "label": "Provider",
+   "options": "Meta\nExotel"
+  },
+  {
+   "fieldname": "meta_settings_section",
+   "fieldtype": "Section Break",
+   "label": "Meta Settings"
+  },
   {
    "fieldname": "token",
    "fieldtype": "Password",
@@ -48,21 +74,45 @@
    "label": "Webhook Verify Token"
   },
   {
-   "default": "0",
-   "fieldname": "enabled",
-   "fieldtype": "Check",
-   "label": "Enabled"
-  },
-  {
    "fieldname": "app_id",
    "fieldtype": "Data",
    "label": "App ID"
+  },
+  {
+   "fieldname": "exotel_settings_section",
+   "fieldtype": "Section Break",
+   "label": "Exotel Settings"
+  },
+  {
+   "fieldname": "api_key",
+   "fieldtype": "Data",
+   "label": "API Key"
+  },
+  {
+   "fieldname": "api_token",
+   "fieldtype": "Password",
+   "label": "API Token"
+  },
+  {
+   "fieldname": "subdomain",
+   "fieldtype": "Data",
+   "label": "Subdomain"
+  },
+  {
+   "fieldname": "sid",
+   "fieldtype": "Data",
+   "label": "SID"
+  },
+  {
+   "fieldname": "from_number",
+   "fieldtype": "Data",
+   "label": "From Number"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-05-03 12:42:25.851544",
+ "modified": "2025-08-04 10:32:45.762274",
  "modified_by": "Administrator",
  "module": "Frappe Whatsapp",
  "name": "WhatsApp Settings",
@@ -79,6 +129,7 @@
    "write": 1
   }
  ],
+ "row_format": "Dynamic",
  "sort_field": "modified",
  "sort_order": "DESC",
  "states": []

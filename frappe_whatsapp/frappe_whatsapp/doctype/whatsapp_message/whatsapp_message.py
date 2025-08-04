@@ -2,8 +2,9 @@
 # For license information, please see license.txt
 import json
 import frappe
+from frappe import _
 from frappe.model.document import Document
-from frappe.integrations.utils import make_post_request
+from frappe_whatsapp.utils.providers import get_provider
 
 
 class WhatsAppMessage(Document):
@@ -73,7 +74,7 @@ class WhatsAppMessage(Document):
                 for field_name in field_names:
                     value = custom_values.get(field_name.strip())
                     parameters.append({"type": "text", "text": value})
-                    template_parameters.append(value)                    
+                    template_parameters.append(value)
 
             else:
                 ref_doc = frappe.get_doc(self.reference_doctype, self.reference_name)
@@ -117,32 +118,16 @@ class WhatsAppMessage(Document):
             "WhatsApp Settings",
             "WhatsApp Settings",
         )
-        token = settings.get_password("token")
 
-        headers = {
-            "authorization": f"Bearer {token}",
-            "content-type": "application/json",
-        }
-        try:
-            response = make_post_request(
-                f"{settings.url}/{settings.version}/{settings.phone_id}/messages",
-                headers=headers,
-                data=json.dumps(data),
+        provider = get_provider(settings)
+        standard_response = provider.send(data)
+
+        if standard_response.status == "sent":
+            self.message_id = standard_response.message_id
+        else:
+            frappe.throw(
+                _(f"Failed to send message: {standard_response.error_message or 'Unknown error'}")
             )
-            self.message_id = response["messages"][0]["id"]
-
-        except Exception as e:
-            res = frappe.flags.integration_request.json()["error"]
-            error_message = res.get("Error", res.get("message"))
-            frappe.get_doc(
-                {
-                    "doctype": "WhatsApp Notification Log",
-                    "template": "Text Message",
-                    "meta_data": frappe.flags.integration_request.json(),
-                }
-            ).insert(ignore_permissions=True)
-
-            frappe.throw(msg=error_message, title=res.get("error_user_title", "Error"))
 
     def format_number(self, number):
         """Format number."""

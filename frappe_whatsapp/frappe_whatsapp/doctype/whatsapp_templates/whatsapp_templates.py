@@ -5,6 +5,7 @@
 import os
 import json
 import frappe
+from frappe_whatsapp.utils.providers import get_provider
 import magic
 from frappe.model.document import Document
 from frappe.integrations.utils import make_post_request, make_request
@@ -201,76 +202,84 @@ class WhatsAppTemplates(Document):
 
 @frappe.whitelist()
 def fetch():
-    """Fetch templates from meta."""
-
-    # get credentials
     settings = frappe.get_doc("WhatsApp Settings", "WhatsApp Settings")
-    token = settings.get_password("token")
-    url = settings.url
-    version = settings.version
-    business_id = settings.business_id
+    provider_instance = get_provider(settings)
 
-    headers = {"authorization": f"Bearer {token}", "content-type": "application/json"}
+    # provider_instance.fetch_templates() now returns a list of standardized template dicts
+    # We explicitly name it 'normalized_templates' for clarity.
+    normalized_templates = provider_instance.fetch_templates()
 
-    try:
-        response = make_request(
-            "GET",
-            f"{url}/{version}/{business_id}/message_templates",
-            headers=headers,
-        )
+    # The provider's fetch_templates method should handle logging/throwing errors
+    # if the API call itself fails. This check is for an empty list, which could mean no templates.
+    if not normalized_templates:
+        frappe.msgprint(_("No templates found or an error occurred while fetching templates."), indicator="orange", alert=True)
+        return [] # Return an empty list if no templates or error
 
-        for template in response["data"]:
-            # set flag to insert or update
-            flags = 1
-            if frappe.db.exists("WhatsApp Templates", {"actual_name": template["name"]}):
-                doc = frappe.get_doc("WhatsApp Templates", {"actual_name": template["name"]})
-            else:
-                flags = 0
-                doc = frappe.new_doc("WhatsApp Templates")
-                doc.template_name = template["name"]
-                doc.actual_name = template["name"]
+    for template_data in normalized_templates: # Iterate through the standardized dictionaries
+        doc = None
+        # Use 'name' for checking existence as it's the consistent unique identifier
+        if frappe.db.exists("WhatsApp Templates", {"actual_name": template_data["name"]}):
+            doc = frappe.get_doc("WhatsApp Templates", {"actual_name": template_data["name"]})
+            is_new_doc = False
+        else:
+            doc = frappe.new_doc("WhatsApp Templates")
+            doc.template_name = template_data["name"] # Frappe DocType name
+            doc.actual_name = template_data["name"] # Provider's actual template name
+            is_new_doc = True
 
-            doc.status = template["status"]
-            doc.language_code = template["language"]
-            doc.category = template["category"]
-            doc.id = template["id"]
+        # Assign values from the standardized 'template_data' dictionary
+        doc.status = template_data.get("status")
+        doc.language_code = template_data.get("language_code") # Now consistently 'language_code'
+        doc.category = template_data.get("category")
+        doc.id = template_data.get("id") # Provider-specific template ID
 
-            # update components
-            for component in template["components"]:
+        # Reset components before populating to ensure consistency if a component is removed remotely
+        doc.header_type = None
+        doc.header = None
+        doc.footer = None
+        doc.template = None
+        doc.sample_values = None
+        doc.sample = None # Assuming 'sample' is for media path, reset it
 
-                # update header
-                if component["type"] == "HEADER":
-                    doc.header_type = component["format"]
+        # Update components based on the standardized component structure
+        for component in template_data.get("components", []):
+            if component.get("type") == "HEADER":
+                doc.header_type = component.get("format")
+                if component.get("format") == "TEXT":
+                    doc.header = component.get("text")
+                    # 'example_text' is the standardized key for header text examples
+                    if component.get("example_text"):
+                        doc.sample = ", ".join(str(val) for val in component["example_text"])
+                elif component.get("format") in ["IMAGE", "VIDEO", "DOCUMENT"]:
+                    # How you handle doc.sample for media headers depends on your DocType.
+                    # 'example_handle' might contain media IDs or URLs.
+                    # You might need further logic here to fetch/store the media or just store its ID/URL.
+                    pass # Keep header_type set, but sample might remain None or require a custom field.
 
-                    # if format is text update sample text
-                    if component["format"] == "TEXT":
-                        doc.header = component["text"]
-                # Update footer text
-                elif component["type"] == "FOOTER":
-                    doc.footer = component["text"]
+            elif component.get("type") == "FOOTER":
+                doc.footer = component.get("text")
+            elif component.get("type") == "BODY":
+                doc.template = component.get("text")
+                # 'example_body_text' is the standardized key for body text examples
+                if component.get("example_body_text"):
+                    # The example is a list of lists, take the first inner list
+                    if component["example_body_text"] and component["example_body_text"][0]:
+                        doc.sample_values = ",".join(str(val) for val in component["example_body_text"][0])
+                    else:
+                        doc.sample_values = None
+                else:
+                    doc.sample_values = None
 
-                # update template text
-                elif component["type"] == "BODY":
-                    doc.template = component["text"]
-                    if component.get("example"):
-                        doc.sample_values = ",".join(
-                            component["example"]["body_text"][0]
-                        )
+            # Add more component types like BUTTONS here if your DocType supports them
+            # elif component.get("type") == "BUTTONS":
+            #     doc.buttons_json = json.dumps(component.get("buttons")) # Example for storing buttons as JSON
 
-            # if document exists update else insert
-            # used db_update and db_insert to ignore hooks
-            if flags:
-                doc.db_update()
-            else:
-                doc.db_insert()
-            frappe.db.commit()
+        # Save the document
+        if not is_new_doc:
+            doc.db_update()
+        else:
+            doc.db_insert()
 
-    except Exception as e:
-        res = frappe.flags.integration_request.json()["error"]
-        error_message = res.get("error_user_msg", res.get("message"))
-        frappe.throw(
-            msg=error_message,
-            title=res.get("error_user_title", "Error"),
-        )
+        frappe.db.commit()
 
-    return "Successfully fetched templates from meta"
+    return _("Successfully fetched templates from the configured WhatsApp provider")
