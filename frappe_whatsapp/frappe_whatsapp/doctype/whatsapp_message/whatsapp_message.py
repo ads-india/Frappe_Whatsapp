@@ -2,6 +2,7 @@
 # For license information, please see license.txt
 import json
 import frappe
+from frappe import _
 from frappe.model.document import Document
 from frappe_whatsapp.utils.providers import get_provider
 
@@ -119,8 +120,14 @@ class WhatsAppMessage(Document):
         )
 
         provider = get_provider(settings)
-        response = provider.send(data)
-        self.message_id = response["messages"][0]["id"]
+        standard_response = provider.send(data)
+
+        if standard_response.status == "sent":
+            self.message_id = standard_response.message_id
+        else:
+            frappe.throw(
+                _(f"Failed to send message: {standard_response.error_message or 'Unknown error'}")
+            )
 
     def format_number(self, number):
         """Format number."""

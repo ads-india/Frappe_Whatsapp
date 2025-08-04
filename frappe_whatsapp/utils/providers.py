@@ -1,8 +1,16 @@
 import abc
 import json
+import json
 import frappe
-from frappe.integrations.utils import make_post_request, make_request # Ensure both are imported
+from frappe.integrations.utils import make_post_request, make_request
 from frappe import _
+
+class StandardMessageResponse:
+    def __init__(self, message_id=None, status="sent", raw_response=None, error_message=None):
+        self.message_id = message_id
+        self.status = status
+        self.raw_response = raw_response
+        self.error_message = error_message
 
 class BaseProvider(abc.ABC):
     """Abstract base class for WhatsApp providers."""
@@ -33,21 +41,20 @@ class BaseProvider(abc.ABC):
 
 
 class MetaProvider(BaseProvider):
-    """Provider for Meta's official WhatsApp Cloud API."""
-
-    def send(self, data, template_name=None):
+    def send(self, data, template_name=None) -> StandardMessageResponse:
         token = self.settings.get_password("token")
         headers = {
             "authorization": f"Bearer {token}",
             "content-type": "application/json",
         }
         try:
-            response = make_post_request(
+            raw_response = make_post_request(
                 f"{self.settings.url}/{self.settings.version}/{self.settings.phone_id}/messages",
                 headers=headers,
                 data=json.dumps(data),
             )
-            return response
+            message_id = raw_response.get("messages", [{}])[0].get("id")
+            return StandardMessageResponse(message_id=message_id, status="sent", raw_response=raw_response)
         except Exception as e:
             error_message = str(e)
             error_title = "Error"
@@ -61,12 +68,14 @@ class MetaProvider(BaseProvider):
                 except (json.JSONDecodeError, AttributeError):
                     pass
             self._log_error_and_throw(template_name, error_response, error_message, error_title)
+            return StandardMessageResponse(status="failed", raw_response=error_response, error_message=error_message)
 
-    def fetch_templates(self):
+
+    def fetch_templates(self) -> list[dict]:
         token = self.settings.get_password("token")
         url = self.settings.url
         version = self.settings.version
-        business_id = self.settings.business_id # Assuming business_id is available in settings for Meta
+        business_id = self.settings.business_id
 
         if not business_id:
             frappe.throw(_("Meta Business ID is not set in WhatsApp Settings. Cannot fetch templates."))
@@ -74,12 +83,48 @@ class MetaProvider(BaseProvider):
         headers = {"authorization": f"Bearer {token}", "content-type": "application/json"}
 
         try:
-            response = make_request(
+            raw_response = make_request(
                 "GET",
                 f"{url}/{version}/{business_id}/message_templates",
                 headers=headers,
             )
-            return response
+            meta_templates = raw_response.get("data", [])
+            normalized_templates = []
+
+            for tpl in meta_templates:
+                normalized_template = {
+                    "name": tpl.get("name"),
+                    "id": tpl.get("id"),
+                    "status": tpl.get("status"),
+                    "language_code": tpl.get("language"),
+                    "category": tpl.get("category"),
+                    "components": []
+                }
+
+                for component in tpl.get("components", []):
+                    standard_component = {"type": component.get("type")}
+                    if component["type"] == "HEADER":
+                        standard_component["format"] = component.get("format")
+                        if component.get("format") == "TEXT":
+                            standard_component["text"] = component.get("text")
+                            if component.get("example", {}).get("header_text"):
+                                standard_component["example_text"] = component["example"]["header_text"]
+                        elif component.get("format") in ["IMAGE", "VIDEO", "DOCUMENT"]:
+                            if component.get("example", {}).get("header_handle"):
+                                standard_component["example_handle"] = component["example"]["header_handle"]
+                    elif component["type"] == "BODY":
+                        standard_component["text"] = component.get("text")
+                        if component.get("example", {}).get("body_text"):
+                            standard_component["example_body_text"] = component["example"]["body_text"]
+                    elif component["type"] == "FOOTER":
+                        standard_component["text"] = component.get("text")
+                    elif component["type"] == "BUTTONS":
+                        standard_component["buttons"] = component.get("buttons")
+
+                    normalized_template["components"].append(standard_component)
+                normalized_templates.append(normalized_template)
+
+            return normalized_templates
         except Exception as e:
             error_message = str(e)
             error_title = "Error"
@@ -93,29 +138,45 @@ class MetaProvider(BaseProvider):
                 except (json.JSONDecodeError, AttributeError):
                     pass
             self._log_error_and_throw("Template Fetch", error_response, error_message, error_title)
+            return []
 
 
-class ExotelProvider(BaseProvider): # Inherit from BaseProvider, NOT MetaProvider
-    """Provider for Exotel's WhatsApp API."""
-
-    def send(self, data, template_name=None):
+class ExotelProvider(BaseProvider):
+    def send(self, data, template_name=None) -> StandardMessageResponse:
         api_key = self.settings.get("api_key")
         api_token = self.settings.get_password("api_token")
         subdomain = self.settings.get("subdomain")
         sid = self.settings.get("sid")
+        from_number = self.settings.get("from_number")
 
-        url = f"https://{subdomain}/v2/accounts/{sid}/messages" # Check Exotel docs for v1 or v2
-        auth = (api_key, api_token) # Exotel typically uses Basic Auth with key:token
-        headers = {"content-type": "application/json"}
+        if not from_number:
+            frappe.throw(_("Exotel 'From' number is not set in WhatsApp Settings. Cannot send message."))
 
+        to_number = data.pop("to")
+        content = data
+
+        exotel_payload = {
+            "whatsapp": {
+                "messages": [
+                    {"from": from_number, "to": to_number, "content": content}
+                ]
+            }
+        }
+
+        status_callback_url = self.settings.get("status_callback_url")
+        if status_callback_url:
+            exotel_payload["status_callback"] = status_callback_url
+
+        url = f"https://{api_key}:{api_token}@{subdomain}/v2/accounts/{sid}/messages"
+        headers = {"content-Type": "application/json"}
         try:
-            response = make_post_request(
+            raw_response = make_post_request(
                 url,
-                auth=auth, # Use basic auth
                 headers=headers,
-                data=json.dumps(data),
+                data=json.dumps(exotel_payload),
             )
-            return response
+            message_id = raw_response.get("response", {}).get("whatsapp", {}).get("messages", [{}])[0].get("data", {}).get("sid")
+            return StandardMessageResponse(message_id=message_id, status="sent", raw_response=raw_response)
         except Exception as e:
             error_message = str(e)
             error_response = {}
@@ -126,9 +187,76 @@ class ExotelProvider(BaseProvider): # Inherit from BaseProvider, NOT MetaProvide
                 except (json.JSONDecodeError, AttributeError):
                     pass
             self._log_error_and_throw(template_name, error_response, error_message)
+            return StandardMessageResponse(status="failed", raw_response=error_response, error_message=error_message)
 
-    def fetch_templates(self):
-        """Fetches message templates from Exotel's API."""
+    def fetch_templates(self) -> list[dict]:
+        api_key = self.settings.get("api_key")
+        api_token = self.settings.get_password("api_token")
+        subdomain = self.settings.get("subdomain")
+        sid = self.settings.get("sid")
+        waba_id = self.settings.get("waba_id")
+
+        if not waba_id:
+            frappe.throw(_("Exotel WhatsApp Business Account ID (WABA ID) is not set in WhatsApp Settings. Cannot fetch templates."))
+
+        url = f"https://{api_key}:{api_token}@{subdomain}/v2/accounts/{sid}/templates?waba_id={waba_id}"
+        headers = {"content-type": "application/json"}
+
+        try:
+            raw_response = make_request(
+                "GET",
+                url,
+                headers=headers,
+            )
+            exotel_templates = raw_response.get("data", [])
+            normalized_templates = []
+
+            for tpl in exotel_templates:
+                normalized_template = {
+                    "name": tpl.get("name"),
+                    "id": tpl.get("template_id"),
+                    "status": tpl.get("status"),
+                    "language_code": tpl.get("language"),
+                    "category": tpl.get("category"),
+                    "components": []
+                }
+
+                for component in tpl.get("components", []):
+                    standard_component = {"type": component.get("type")}
+                    if component["type"] == "HEADER":
+                        standard_component["format"] = component.get("format")
+                        if component.get("format") == "TEXT":
+                            standard_component["text"] = component.get("text")
+                            if component.get("example", {}).get("header_text"):
+                                standard_component["example_text"] = component["example"]["header_text"]
+                        elif component.get("format") in ["IMAGE", "VIDEO", "DOCUMENT"]:
+                            if component.get("example", {}).get("header_handle"):
+                                standard_component["example_handle"] = component["example"]["header_handle"]
+                    elif component["type"] == "BODY":
+                        standard_component["text"] = component.get("text")
+                        if component.get("example", {}).get("body_text"):
+                            standard_component["example_body_text"] = component["example"]["body_text"]
+                    elif component["type"] == "FOOTER":
+                        standard_component["text"] = component.get("text")
+                    elif component["type"] == "BUTTONS":
+                        standard_component["buttons"] = component.get("buttons")
+
+                    normalized_template["components"].append(standard_component)
+                normalized_templates.append(normalized_template)
+
+            return normalized_templates
+        except Exception as e:
+            error_message = str(e)
+            error_response = {}
+            if hasattr(frappe.flags, "integration_request") and frappe.flags.integration_request:
+                try:
+                    error_response = frappe.flags.integration_request.json()
+                    error_message = error_response.get("message", error_message)
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+            self._log_error_and_throw("Template Fetch", error_response, error_message)
+            return [] # Return empty list on failure after logging
+
 
 
 PROVIDER_MAP = {
@@ -144,3 +272,56 @@ def get_provider(settings):
     if not provider_class:
         frappe.throw(f"Unknown WhatsApp provider: {provider_name}")
     return provider_class(settings)
+
+def get_message_id_from_provider_response(response: dict) -> str | None:
+    """
+    Parses the raw API response from a WhatsApp provider to extract the message ID.
+    Handles different response structures for Meta and Exotel.
+
+    Args:
+        response (dict): The raw dictionary response from the WhatsApp provider's API.
+
+    Returns:
+        str | None: The extracted message ID if successful, otherwise None.
+                    Raises a Frappe error if parsing fails for a known provider.
+    """
+    provider_name = frappe.db.get_value("WhatsApp Settings", None, "provider")
+    message_id = None # Initialize message_id
+
+    if provider_name == "Exotel":
+        try:
+            # For Exotel, the message ID (sid) is nested deeper
+            message_id = response["response"]["whatsapp"]["messages"][0]["data"]["sid"]
+        except (KeyError, IndexError) as e:
+            # Log the error with the full response for debugging
+            frappe.log_error(
+                f"Exotel response missing expected keys for message ID: {e} | Response: {response}",
+                "Exotel Response Parsing Error"
+            )
+            # Re-throw as a Frappe error to stop execution and inform the user
+            frappe.throw(_(f"Failed to parse Exotel response for message ID. Please check server logs for details. Raw Response: {json.dumps(response)}"))
+    elif provider_name == "Meta":
+        try:
+            # For Meta, the message ID is at the top level
+            message_id = response["messages"][0]["id"]
+        except (KeyError, IndexError) as e:
+            # Log the error with the full response for debugging
+            frappe.log_error(
+                f"Meta response missing expected keys for message ID: {e} | Response: {response}",
+                "Meta Response Parsing Error"
+            )
+            # Re-throw as a Frappe error
+            frappe.throw(_(f"Failed to parse Meta response for message ID. Please check server logs for details. Raw Response: {json.dumps(response)}"))
+    else:
+        # Handle cases where provider is not 'Exotel' or 'Meta', or is not set
+        frappe.log_warn(
+            f"Unknown provider '{provider_name}' or unhandled response format for message_id extraction. Response: {response}",
+            "WhatsApp Message ID Parsing Warning"
+        )
+        # Optionally, you could try a generic guess here if desired, e.g.,
+        # try:
+        #     message_id = response.get("messages", [{}])[0].get("id")
+        # except Exception:
+        #     pass # Keep message_id as None
+
+    return message_id

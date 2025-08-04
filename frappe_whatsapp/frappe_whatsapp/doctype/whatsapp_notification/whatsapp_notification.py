@@ -214,60 +214,62 @@ class WhatsAppNotification(Document):
             self.notify(data, doc_data)
 
     def notify(self, data, doc_data=None):
-        """Notify."""
-        settings = frappe.get_doc(
-            "WhatsApp Settings", "WhatsApp Settings",
-        )
+        settings = frappe.get_doc("WhatsApp Settings", "WhatsApp Settings")
         provider = get_provider(settings)
 
         try:
-            message_id = provider.send(data, self.template)
+            standard_response = provider.send(data, self.template)
 
-            if not self.get("content_type"):
-                self.content_type = 'text'
+            if standard_response.status == "sent":
+                if not self.get("content_type"):
+                    self.content_type = 'text'
 
-            new_doc = {
-                "doctype": "WhatsApp Message",
-                "type": "Outgoing",
-                "message": str(data.get('template')),
-                "to": data['to'],
-                "message_type": "Template",
-                "message_id": message_id,
-                "content_type": self.content_type,
-            }
+                new_doc = {
+                    "doctype": "WhatsApp Message",
+                    "type": "Outgoing",
+                    # Use text if template is not present
+                    "message": str(data.get('template') or data.get('text', '')),
+                    "to": data['to'],
+                    # Determine message type based on payload
+                    "message_type": "Template" if data.get('template') else "Text",
+                    "message_id": standard_response.message_id,
+                    "content_type": self.content_type,
+                }
 
-            if doc_data:
-                new_doc.update({
-                    "reference_doctype": doc_data.get("doctype"),
-                    "reference_name": doc_data.get("name"),
-                })
+                if doc_data:
+                    new_doc.update({
+                        "reference_doctype": doc_data.get("doctype"),
+                        "reference_name": doc_data.get("name"),
+                    })
 
-            frappe.get_doc(new_doc).save(ignore_permissions=True)
+                frappe.get_doc(new_doc).save(ignore_permissions=True)
 
-            if doc_data and self.set_property_after_alert and self.property_value:
-                if doc_data.get("doctype") and doc_data.get("name"):
-                    fieldname = self.set_property_after_alert
-                    value = self.property_value
-                    meta = frappe.get_meta(doc_data.get("doctype"))
-                    df = meta.get_field(fieldname)
-                    if df:
-                        if df.fieldtype in frappe.model.numeric_fieldtypes:
-                            value = frappe.utils.cint(value)
+                if doc_data and self.set_property_after_alert and self.property_value:
+                    if doc_data.get("doctype") and doc_data.get("name"):
+                        fieldname = self.set_property_after_alert
+                        value = self.property_value
+                        meta = frappe.get_meta(doc_data.get("doctype"))
+                        df = meta.get_field(fieldname)
+                        if df:
+                            if df.fieldtype in frappe.model.numeric_fieldtypes:
+                                value = frappe.utils.cint(value)
+                            frappe.db.set_value(doc_data.get("doctype"), doc_data.get("name"), fieldname, value)
 
-                        frappe.db.set_value(doc_data.get("doctype"), doc_data.get("name"), fieldname, value)
-
-            frappe.msgprint(_("WhatsApp Message Triggered"), indicator="green", alert=True)
+                frappe.msgprint(_("WhatsApp Message Triggered"), indicator="green", alert=True)
+            else:
+                # If provider.send returned a 'failed' status but didn't throw an exception immediately
+                frappe.msgprint(
+                    _("Failed to trigger whatsapp message: {0}").format(standard_response.error_message or "Unknown error"),
+                    indicator="red",
+                    alert=True
+                )
 
         except Exception as e:
-            # Provider already logs the error to WhatsApp Notification Log.
-            # We just show the message to the user.
             frappe.msgprint(
                 _("Failed to trigger whatsapp message: {0}").format(str(e)),
                 indicator="red",
                 alert=True
             )
-
-
     def on_trash(self):
         """On delete remove from schedule."""
         frappe.cache().delete_value("whatsapp_notification_map")
