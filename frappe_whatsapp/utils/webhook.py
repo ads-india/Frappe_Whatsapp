@@ -9,7 +9,7 @@ import frappe.utils
 
 @frappe.whitelist(allow_guest=True)
 def webhook():
-	"""Meta webhook."""
+	"""Meta and Exotel webhook."""
 	if frappe.request.method == "GET":
 		return get()
 	return post()
@@ -30,6 +30,17 @@ def get():
 def post():
 	"""Post."""
 	data = frappe.local.form_dict
+	settings = frappe.get_doc("WhatsApp Settings", "WhatsApp Settings")
+
+	if settings.provider == "Exotel":
+		return handle_exotel_webhook(data)
+	elif settings.provider == "Meta":
+		return handle_meta_webhook(data)
+	else:
+		frappe.throw("Invalid WhatsApp provider configured.")
+
+def handle_meta_webhook(data):
+	"""Handle Meta webhook."""
 	frappe.get_doc({
 		"doctype": "WhatsApp Notification Log",
 		"template": "Webhook",
@@ -174,6 +185,58 @@ def post():
 			changes = data["entry"]["changes"][0]
 		update_status(changes)
 	return
+
+def handle_exotel_webhook(data):
+	"""Handle Exotel webhook."""
+	try:
+		messages = data["whatsapp"]["messages"]
+	except KeyError:
+		# No messages in the payload, maybe it's a status update
+		# Exotel status updates are not in the message list
+		# For now, let's assume all incoming payloads are messages
+		return
+
+	for message in messages:
+		# Create a log for every incoming message
+		frappe.get_doc({
+			"doctype": "WhatsApp Notification Log",
+			"template": "Webhook",
+			"meta_data": json.dumps(message)
+		}).insert(ignore_permissions=True)
+
+		message_id = message.get("sid")
+		from_number = message["from"]
+		profile_name = message["profile_name"]
+		content = message["content"]
+		message_type = content["type"]
+		message_body = None
+		reply_to_message_id = None
+		is_reply = False
+		content_type = message_type
+
+		if message_type == "text":
+			message_body = content["text"]["body"]
+		elif message_type == "interactive":
+			interactive_data = content["interactive"]
+			if interactive_data.get("nfm_reply"):
+				message_body = interactive_data["nfm_reply"]["response_json"]
+				content_type = "flow"
+				reply_to_message_id = content["context"]["sid"]
+				is_reply = True
+
+		if message_body:
+			frappe.get_doc({
+				"doctype": "WhatsApp Message",
+				"type": "Incoming",
+				"from": from_number,
+				"message": message_body,
+				"message_id": message_id,
+				"reply_to_message_id": reply_to_message_id,
+				"is_reply": is_reply,
+				"content_type": content_type,
+				"profile_name": profile_name
+			}).insert(ignore_permissions=True)
+
 
 def update_status(data):
 	"""Update status hook."""
