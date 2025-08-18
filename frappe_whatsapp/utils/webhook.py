@@ -92,15 +92,7 @@ def handle_meta_webhook(data):
 					"profile_name":sender_profile_name
 				}).insert(ignore_permissions=True)
 			elif message_type == 'interactive':
-				frappe.get_doc({
-					"doctype": "WhatsApp Message",
-					"type": "Incoming",
-					"from": message['from'],
-					"message": message['interactive']['nfm_reply']['response_json'],
-					"message_id": message['id'],
-					"content_type": "flow",
-					"profile_name":sender_profile_name
-				}).insert(ignore_permissions=True)
+				return
 			elif message_type in ["image", "audio", "video", "document"]:
 				settings = frappe.get_doc(
 							"WhatsApp Settings", "WhatsApp Settings",
