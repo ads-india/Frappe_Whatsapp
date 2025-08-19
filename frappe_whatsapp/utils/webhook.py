@@ -217,12 +217,7 @@ def handle_exotel_webhook(data):
 		if message_type == "text":
 			message_body = content["text"]["body"]
 		elif message_type == "interactive":
-			interactive_data = content["interactive"]
-			if interactive_data.get("nfm_reply"):
-				message_body = interactive_data["nfm_reply"]["response_json"]
-				content_type = "flow"
-				reply_to_message_id = content["context"]["sid"]
-				is_reply = True
+			return
 
 		if message_body:
 			frappe.get_doc({
